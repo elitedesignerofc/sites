@@ -105,6 +105,8 @@ input:focus,textarea:focus{outline:2px solid var(--blue)}
 .tile .novideo{color:var(--muted);font-size:13px}
 .ctrl.off{background:#2a2f3a;color:var(--muted)}
 .ctrl.active{background:var(--blue);color:var(--ink);border-color:var(--blue)}
+.ctrl.rec-active{background:#E5484D;color:#fff;border-color:#E5484D}
+.rec-banner{position:absolute;top:14px;left:50%;transform:translateX(-50%);background:#E5484D;color:#fff;padding:7px 16px;border-radius:20px;font-size:13px;font-weight:700;z-index:6;display:flex;align-items:center;gap:6px}
 .side{display:flex;flex-direction:column}
 .plist{padding:18px;border-bottom:1px solid var(--line)}
 .plist h4{margin:0 0 12px;font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:1px}
@@ -207,6 +209,7 @@ input:focus,textarea:focus{outline:2px solid var(--blue)}
   </div>
   <div class="room-body">
     <div class="stage">
+      <div class="rec-banner" id="recBanner" style="display:none">🔴 Gravando</div>
       <div class="stage-grid" id="stageGrid"></div>
       <div class="board-overlay" id="boardOverlay">
         <div class="board-toolbar">
@@ -231,6 +234,7 @@ input:focus,textarea:focus{outline:2px solid var(--blue)}
     <button class="ctrl" id="camBtn" title="Câmera" onclick="toggleCam()">📷</button>
     <button class="ctrl" id="shareBtn" title="Compartilhar tela" onclick="toggleShare()">🖥️</button>
     <button class="ctrl" id="boardBtn" title="Lousa" onclick="toggleBoard()">✏️</button>
+    <button class="ctrl" id="recBtn" title="Gravar" onclick="toggleRecording()">⏺️</button>
     <button class="ctrl leave" onclick="leaveRoom()">Saída</button>
   </div>
 </div>
@@ -288,6 +292,21 @@ input:focus,textarea:focus{outline:2px solid var(--blue)}
     </div>
 
     <div class="asec">
+      <h3>Acesso ao painel</h3><p class="hint">Senha pedida ao abrir o painel admin. Também é a chave usada pra ver as salas ativas.</p>
+      <input type="text" id="cfgAdminPw" placeholder="maldivas123">
+      <label>Nome exibido quando você entra numa sala pra acompanhar</label>
+      <input type="text" id="cfgAdminName" placeholder="Responsável">
+    </div>
+
+    <div class="asec">
+      <h3>Salas ativas</h3>
+      <p class="hint">Só mostra código, criador e nº de pessoas — não mostra o vídeo/áudio de ninguém. Pra acompanhar ao vivo, deixe esta aba aberta.</p>
+      <button class="smallbtn" onclick="startDirectory()">Ativar lista ao vivo</button>
+      <div id="dirStatus" style="color:var(--muted);font-size:13px;margin-top:10px"></div>
+      <div id="dirList" style="margin-top:12px"></div>
+    </div>
+
+    <div class="asec">
       <h3>Cards de recursos (features)</h3><p class="hint">Formato JSON — um item por linha: título e texto curto.</p>
       <textarea id="cfgFeatures" rows="8"></textarea>
     </div>
@@ -315,7 +334,7 @@ const DEFAULTS = {
   heroText:"Crie uma sala, manda o link pra galera da Maldivas e já era — abre no navegador, compartilha a tela ou a câmera, fala por voz e desenha na lousa. Sem instalar nada.",
   footer:"Tela Maldivas — comunidade Maldivas City.",
   blue:"#1e9ff2", blue2:"#59c1ff", bg:"#0a0d12", bg2:"#12161d",
-  codePrefix:"MLDV-", codeLen:4, minPw:4, maxPeople:12, lockDefault:false,
+  codePrefix:"MLDV-", codeLen:4, minPw:4, maxPeople:12, lockDefault:false, adminPassword:"maldivas123", adminDisplayName:"Responsável",
   features:[
     {t:"Sem instalar nada", d:"Abre direto no navegador. Manda o link no grupo e a galera já entra."},
     {t:"Chamada de voz", d:"Conversa com todo mundo da sala, até enquanto compartilha a tela."},
@@ -401,16 +420,19 @@ function joinRoom(){
 
 /* ---- WebRTC real, via PeerJS (signaling gratuito, sem servidor próprio) ---- */
 let peer=null, localStream=null, screenStream=null, myId=null, myName='Você', sharing=false;
-let isHostRoom=false, roomPassword=null, myPwAttempt='';
+let isHostRoom=false, roomPassword=null, myPwAttempt='', adminJoinKey='';
 let peersReg={}; // id -> {name, conn, call}
+const DIRECTORY_ID = 'MALDIVASDIRECTORY01';
+let dirConn=null, dirHeartbeat=null;
 
 function knownMap(){ const m={}; m[myId]=myName; Object.keys(peersReg).forEach(k=>{ if(peersReg[k].name) m[k]=peersReg[k].name; }); return m; }
 
-async function startRealtime(isHost, code, name, pwField){
+async function startRealtime(isHost, code, name, pwField, asAdmin){
   myName = name;
   isHostRoom = isHost;
   roomPassword = isHost ? (pwField || null) : null;
   myPwAttempt = isHost ? '' : (pwField || '');
+  adminJoinKey = asAdmin ? CFG.adminPassword : '';
   document.getElementById('callStatus').textContent = 'Conectando...';
   const id = isHost ? sanitizeId(code) : ('P'+Math.random().toString(36).slice(2,9)).toUpperCase();
   peer = new Peer(id);
@@ -423,6 +445,7 @@ async function startRealtime(isHost, code, name, pwField){
     updatePlist();
     document.getElementById('callStatus').textContent = isHost ? 'Sala criada — manda o código pra galera.' : 'Entrando na sala...';
     if(!isHost) connectToPeer(sanitizeId(code), myPwAttempt);
+    if(isHost) registerRoom(code, name);
   });
   peer.on('connection', conn=>setupDataConn(conn));
   peer.on('call', call=>{
@@ -444,7 +467,7 @@ function connectToPeer(remoteId, pwAttempt){
   const conn = peer.connect(remoteId, {metadata:{name:myName}});
   peersReg[remoteId] = peersReg[remoteId] || {};
   peersReg[remoteId].conn = conn;
-  conn.on('open', ()=>{ conn.send({type:'join', name:myName, password: pwAttempt||''}); });
+  conn.on('open', ()=>{ conn.send({type:'join', name:myName, password: pwAttempt||'', adminKey: adminJoinKey||''}); });
   conn.on('data', msg=>handleData(conn, msg));
   conn.on('close', ()=>{ removeTile(conn.peer); delete peersReg[conn.peer]; updatePlist(); });
 }
@@ -459,7 +482,8 @@ function handleData(conn, msg){
   if(msg.type==='join'){
     peersReg[conn.peer] = peersReg[conn.peer] || {};
     peersReg[conn.peer].name = msg.name;
-    if(isHostRoom && roomPassword && msg.password !== roomPassword){
+    const isAdminBypass = msg.adminKey && msg.adminKey === CFG.adminPassword;
+    if(isHostRoom && roomPassword && msg.password !== roomPassword && !isAdminBypass){
       conn.send({type:'denied'});
       setTimeout(()=>{ conn.close(); delete peersReg[conn.peer]; }, 80);
       return;
@@ -482,6 +506,11 @@ function handleData(conn, msg){
     drawLine(msg.x0*c.width, msg.y0*c.height, msg.x1*c.width, msg.y1*c.height, msg.color, msg.size);
   } else if(msg.type==='clear'){
     clearBoard(false);
+  } else if(msg.type==='rec-start'){
+    document.getElementById('recBanner').innerHTML = '🔴 '+msg.by+' está gravando';
+    document.getElementById('recBanner').style.display='flex';
+  } else if(msg.type==='rec-stop'){
+    document.getElementById('recBanner').style.display='none';
   }
 }
 function finishHandshake(conn){
@@ -553,8 +582,21 @@ function replaceOutgoingVideo(track){
     }
   });
 }
+function registerRoom(code, hostName){
+  if(dirConn){ dirConn.close(); } if(dirHeartbeat) clearInterval(dirHeartbeat);
+  dirConn = peer.connect(DIRECTORY_ID, {metadata:{key:CFG.adminPassword}});
+  dirConn.on('open', ()=>{
+    dirConn.send({type:'register', code, host:hostName, count:Object.keys(peersReg).length+1, hasPw: !!roomPassword, ts:Date.now()});
+    dirHeartbeat = setInterval(()=>{ if(dirConn && dirConn.open) dirConn.send({type:'heartbeat', code, count:Object.keys(peersReg).length+1, ts:Date.now()}); }, 8000);
+  });
+  dirConn.on('error', ()=>{}); // painel de admin não está aberto — segue normal
+}
 function leaveRoom(){
   history.replaceState(null,'', location.pathname);
+  if(isRecording) stopRecording();
+  if(dirConn && dirConn.open && isHostRoom){ try{ dirConn.send({type:'unregister', code: sanitizeId(myId)}); }catch(e){} }
+  if(dirHeartbeat) clearInterval(dirHeartbeat);
+  if(dirConn){ dirConn.close(); dirConn=null; }
   Object.values(peersReg).forEach(p=>{ if(p.call) p.call.close(); if(p.conn) p.conn.close(); });
   peersReg = {};
   if(localStream) localStream.getTracks().forEach(t=>t.stop());
@@ -566,6 +608,58 @@ function leaveRoom(){
   clearBoard(false);
   showView('landing');
 }
+
+/* ---- Gravação da sala — visível pra todo mundo enquanto ativa, salva como arquivo local ao parar ---- */
+let isRecording=false, mediaRecorder=null, recChunks=[], recCanvas=null, recAudioCtx=null, recTimer=null;
+function toggleRecording(){ if(!isRecording) startRecording(); else stopRecording(); }
+function startRecording(){
+  try{
+    recCanvas = document.createElement('canvas'); recCanvas.width=1280; recCanvas.height=720;
+    const ctx = recCanvas.getContext('2d');
+    recAudioCtx = new (window.AudioContext||window.webkitAudioContext)();
+    const dest = recAudioCtx.createMediaStreamDestination();
+    document.querySelectorAll('#stageGrid video').forEach(v=>{
+      if(v.srcObject && v.srcObject.getAudioTracks().length){ try{ recAudioCtx.createMediaStreamSource(v.srcObject).connect(dest); }catch(e){} }
+    });
+    isRecording = true;
+    (function drawFrame(){
+      if(!isRecording) return;
+      ctx.fillStyle='#0a0d12'; ctx.fillRect(0,0,recCanvas.width,recCanvas.height);
+      const vids = Array.from(document.querySelectorAll('#stageGrid video'));
+      const n = vids.length||1, cols = Math.ceil(Math.sqrt(n)), rows = Math.ceil(n/cols);
+      const cw = recCanvas.width/cols, ch = recCanvas.height/rows;
+      vids.forEach((v,i)=>{ const x=(i%cols)*cw, y=Math.floor(i/cols)*ch; try{ ctx.drawImage(v,x,y,cw,ch); }catch(e){} });
+      recTimer = requestAnimationFrame(drawFrame);
+    })();
+    const videoTrack = recCanvas.captureStream(25).getVideoTracks()[0];
+    const recStream = new MediaStream([videoTrack, ...dest.stream.getAudioTracks()]);
+    mediaRecorder = new MediaRecorder(recStream, {mimeType:'video/webm'});
+    recChunks = [];
+    mediaRecorder.ondataavailable = e=>{ if(e.data.size) recChunks.push(e.data); };
+    mediaRecorder.onstop = ()=>{
+      const blob = new Blob(recChunks, {type:'video/webm'});
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'gravacao-maldivas-'+new Date().toISOString().slice(0,19).replace(/[:T]/g,'-')+'.webm';
+      document.body.appendChild(a); a.click(); a.remove();
+    };
+    mediaRecorder.start();
+    document.getElementById('recBtn').classList.add('rec-active');
+    document.getElementById('recBanner').innerHTML = '🔴 '+myName+' está gravando';
+    document.getElementById('recBanner').style.display='flex';
+    broadcastToAll({type:'rec-start', by:myName});
+  }catch(e){ alert('Esse navegador não deixou iniciar a gravação.'); isRecording=false; }
+}
+function stopRecording(){
+  isRecording = false;
+  if(recTimer) cancelAnimationFrame(recTimer);
+  if(mediaRecorder && mediaRecorder.state!=='inactive') mediaRecorder.stop();
+  if(recAudioCtx){ try{ recAudioCtx.close(); }catch(e){} }
+  document.getElementById('recBtn').classList.remove('rec-active');
+  document.getElementById('recBanner').style.display='none';
+  broadcastToAll({type:'rec-stop'});
+}
+function broadcastToAll(msg){ Object.values(peersReg).forEach(p=>{ if(p.conn && p.conn.open) p.conn.send(msg); }); }
 
 /* ---- Lousa colaborativa (desenho sincronizado via a mesma conexão de dados) ---- */
 let boardOpen=false, drawing=false, boardColor='#1e9ff2', boardSize=4, lastX=0, lastY=0;
@@ -625,7 +719,7 @@ function broadcastBoard(msg){ Object.values(peersReg).forEach(p=>{ if(p.conn && 
 function openAdminGate(){
   const p = prompt('Senha do painel (só pra evitar clique acidental — isso não é segurança de verdade num arquivo estático):');
   if(p===null) return;
-  if(p !== 'maldivas123'){ alert('Senha errada. Padrão: maldivas123'); return; }
+  if(p !== CFG.adminPassword){ alert('Senha errada.'); return; }
   fillAdminForm(); showView('admin');
 }
 function fillAdminForm(){
@@ -646,6 +740,7 @@ function fillAdminForm(){
   document.getElementById('cfgMinPw').value=CFG.minPw;
   document.getElementById('cfgMaxPeople').value=CFG.maxPeople;
   document.getElementById('cfgLockDefault').classList.toggle('checked', !!CFG.lockDefault);
+  document.getElementById('cfgAdminPw').value=CFG.adminPassword;
   document.getElementById('cfgFeatures').value=JSON.stringify(CFG.features,null,2);
   document.getElementById('cfgSteps').value=JSON.stringify(CFG.steps,null,2);
 }
@@ -668,6 +763,7 @@ function saveCfg(){
     CFG.minPw=parseInt(document.getElementById('cfgMinPw').value)||0;
     CFG.maxPeople=parseInt(document.getElementById('cfgMaxPeople').value)||12;
     CFG.lockDefault=document.getElementById('cfgLockDefault').classList.contains('checked');
+    CFG.adminPassword=document.getElementById('cfgAdminPw').value || 'maldivas123';
     CFG.features=JSON.parse(document.getElementById('cfgFeatures').value);
     CFG.steps=JSON.parse(document.getElementById('cfgSteps').value);
   }catch(e){ alert('Deu erro no JSON de features ou passos. Confere as vírgulas e chaves.'); return; }
@@ -678,6 +774,43 @@ function saveCfg(){
 function resetCfg(){ if(!confirm('Restaurar tudo pro padrão?')) return; CFG=Object.assign({},DEFAULTS); localStorage.setItem('maldivasCfg', JSON.stringify(CFG)); applyCfg(); fillAdminForm(); }
 function exportCfg(){ const blob=new Blob([JSON.stringify(CFG,null,2)],{type:'application/json'}); const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='maldivas-tela-config.json'; a.click(); }
 function importCfg(ev){ const f=ev.target.files[0]; if(!f) return; const r=new FileReader(); r.onload=()=>{ try{ CFG=Object.assign({},DEFAULTS,JSON.parse(r.result)); localStorage.setItem('maldivasCfg',JSON.stringify(CFG)); applyCfg(); fillAdminForm(); alert('Config importada!'); }catch(e){ alert('Arquivo inválido.'); } }; r.readAsText(f); }
+
+/* ---- Diretório de salas ativas (metadado só: código, quem criou, quantas pessoas) ---- */
+let dirPeer=null, roomsDirectory={};
+function startDirectory(){
+  if(dirPeer){ document.getElementById('dirStatus').textContent='Já está ativo nesta aba.'; return; }
+  document.getElementById('dirStatus').textContent='Abrindo...';
+  dirPeer = new Peer(DIRECTORY_ID);
+  dirPeer.on('open', ()=>{ document.getElementById('dirStatus').textContent='Ativo — escutando salas que forem criadas a partir de agora.'; });
+  dirPeer.on('connection', conn=>{
+    conn.on('data', msg=>{
+      if(!msg || conn.metadata && conn.metadata.key !== CFG.adminPassword) return;
+      if(msg.type==='register'){ roomsDirectory[msg.code]={host:msg.host, count:msg.count, hasPw:msg.hasPw, ts:msg.ts}; renderDirectory(); }
+      else if(msg.type==='heartbeat' && roomsDirectory[msg.code]){ roomsDirectory[msg.code].count=msg.count; roomsDirectory[msg.code].ts=msg.ts; renderDirectory(); }
+      else if(msg.type==='unregister'){ delete roomsDirectory[msg.code]; renderDirectory(); }
+    });
+  });
+  dirPeer.on('error', err=>{
+    if(err.type==='unavailable-id'){ document.getElementById('dirStatus').textContent='Já tem esse painel aberto em outra aba/dispositivo agora.'; dirPeer=null; }
+    else document.getElementById('dirStatus').textContent='Erro: '+err.type;
+  });
+  setInterval(()=>{ const now=Date.now(); Object.keys(roomsDirectory).forEach(c=>{ if(now-roomsDirectory[c].ts>25000) delete roomsDirectory[c]; }); renderDirectory(); }, 5000);
+}
+function renderDirectory(){
+  const box = document.getElementById('dirList');
+  const codes = Object.keys(roomsDirectory);
+  if(!codes.length){ box.innerHTML = '<p style="color:var(--muted);font-size:13px">Nenhuma sala ativa registrada ainda.</p>'; return; }
+  box.innerHTML = codes.map(c=>{
+    const r = roomsDirectory[c];
+    return '<div class="person" style="justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--line)">'+
+      '<span><b>'+c+'</b> — '+r.host+' · '+r.count+' pessoa(s)'+(r.hasPw?' · 🔒':'')+'</span>'+
+      '<button class="smallbtn" onclick="adminJoinRoom(\''+c+'\')">Entrar</button></div>';
+  }).join('');
+}
+function adminJoinRoom(code){
+  showView('room');
+  startRealtime(false, code, '🛡️ Moderação Maldivas', '', true);
+}
 
 loadCfg(); applyCfg();
 document.getElementById('loNum').textContent = (120 + Math.floor(Math.random()*90));
