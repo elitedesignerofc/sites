@@ -205,7 +205,7 @@ input:focus,textarea:focus{outline:2px solid var(--blue)}
 <div class="view" id="view-room">
   <div class="room-head">
     <div class="room-code">Sala <span id="roomCodeShow">MLDV-4X21</span></div>
-    <button class="copybtn" onclick="copyInvite(this)">Copiar link de convite</button>
+    <button class="copybtn" onclick="copyInvite(this)">Copiar código</button>
   </div>
   <div class="room-body">
     <div class="stage">
@@ -300,7 +300,7 @@ input:focus,textarea:focus{outline:2px solid var(--blue)}
 
     <div class="asec">
       <h3>Salas ativas</h3>
-      <p class="hint">Só mostra código, criador e nº de pessoas — não mostra o vídeo/áudio de ninguém. Pra acompanhar ao vivo, deixe esta aba aberta.</p>
+      <p class="hint">Ativa sozinha ao abrir esse painel. Só mostra código, criador e nº de pessoas — não mostra o vídeo/áudio de ninguém. Pra acompanhar ao vivo, deixe esta aba aberta.</p>
       <button class="smallbtn" onclick="startDirectory()">Ativar lista ao vivo</button>
       <div id="dirStatus" style="color:var(--muted);font-size:13px;margin-top:10px"></div>
       <div id="dirList" style="margin-top:12px"></div>
@@ -438,9 +438,7 @@ async function startRealtime(isHost, code, name, pwField, asAdmin){
   peer = new Peer(id);
   peer.on('open', async pid=>{
     myId = pid;
-    try{ localStream = await navigator.mediaDevices.getUserMedia({audio:true, video:true}); }
-    catch(e1){ try{ localStream = await navigator.mediaDevices.getUserMedia({audio:true}); document.getElementById('camBtn').disabled=true; document.getElementById('camBtn').classList.add('off'); }
-      catch(e2){ localStream = new MediaStream(); document.getElementById('callStatus').textContent='Sem acesso a câmera/mic — só assistindo.'; } }
+    localStream = await getLocalMedia();
     addTile(myId, myName+' (você)', localStream, true);
     updatePlist();
     document.getElementById('callStatus').textContent = isHost ? 'Sala criada — manda o código pra galera.' : 'Entrando na sala...';
@@ -456,12 +454,41 @@ async function startRealtime(isHost, code, name, pwField, asAdmin){
     call.on('close', ()=>removeTile(call.peer));
   });
   peer.on('error', err=>{
-    if(err.type==='peer-unavailable'){ document.getElementById('callStatus').textContent='Não achei essa sala — confere o código.'; }
+    if(err.type==='peer-unavailable'){
+      if(err.message && err.message.indexOf(DIRECTORY_ID)!==-1) return; // painel de admin não está aberto — ignora, não é erro da sala
+      document.getElementById('callStatus').textContent='Não achei essa sala — confere o código.';
+    }
     else { document.getElementById('callStatus').textContent='Erro de conexão: '+err.type; }
   });
 }
 /* quem inicia a conexão (connectToPeer) sempre manda 'join' primeiro com a senha tentada.
    quem recebe (setupDataConn, vindo de peer.on('connection')) só responde 'hello' depois de validar. */
+async function getLocalMedia(){
+  let videoTrack=null, audioTrack=null;
+  try{
+    const s = await navigator.mediaDevices.getUserMedia({audio:true, video:true});
+    videoTrack = s.getVideoTracks()[0]; audioTrack = s.getAudioTracks()[0];
+  }catch(e1){
+    try{
+      const s2 = await navigator.mediaDevices.getUserMedia({audio:true});
+      audioTrack = s2.getAudioTracks()[0];
+      document.getElementById('camBtn').disabled=true; document.getElementById('camBtn').classList.add('off');
+    }catch(e2){
+      document.getElementById('camBtn').disabled=true; document.getElementById('camBtn').classList.add('off');
+      document.getElementById('micBtn').disabled=true; document.getElementById('micBtn').classList.add('off');
+      document.getElementById('callStatus').textContent='Sem acesso a câmera/mic — só assistindo, ainda dá pra compartilhar tela.';
+    }
+  }
+  if(!videoTrack){
+    // sem câmera: cria uma faixa de vídeo "vazia" só pra garantir que sempre exista um canal de vídeo na chamada
+    const c=document.createElement('canvas'); c.width=320; c.height=180;
+    const ctx=c.getContext('2d'); ctx.fillStyle='#12161d'; ctx.fillRect(0,0,320,180);
+    ctx.fillStyle='#59c1ff'; ctx.font='14px sans-serif'; ctx.textAlign='center'; ctx.fillText('Sem câmera', 160, 94);
+    videoTrack = c.captureStream(2).getVideoTracks()[0];
+  }
+  const tracks = [videoTrack]; if(audioTrack) tracks.push(audioTrack);
+  return new MediaStream(tracks);
+}
 function connectToPeer(remoteId, pwAttempt){
   if(!remoteId || remoteId===myId || (peersReg[remoteId] && peersReg[remoteId].conn)) return;
   const conn = peer.connect(remoteId, {metadata:{name:myName}});
@@ -531,6 +558,7 @@ function addTile(id, name, stream, isLocal){
     document.getElementById('stageGrid').appendChild(tile);
   }
   tile.querySelector('video').srcObject = stream;
+  tile.querySelector('video').play().catch(()=>{});
   tile.querySelector('.tname').textContent = name;
   if(peersReg[id]) peersReg[id].name = name.replace(' (você)','');
   updatePlist();
@@ -720,7 +748,7 @@ function openAdminGate(){
   const p = prompt('Senha do painel (só pra evitar clique acidental — isso não é segurança de verdade num arquivo estático):');
   if(p===null) return;
   if(p !== CFG.adminPassword){ alert('Senha errada.'); return; }
-  fillAdminForm(); showView('admin');
+  fillAdminForm(); showView('admin'); startDirectory();
 }
 function fillAdminForm(){
   document.getElementById('cfgBrand').value=CFG.brand;
